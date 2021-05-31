@@ -1,0 +1,174 @@
+---
+title: "Standardize & Scale Data, Impute Missing Values"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+## Basic setup for plotting and data handling
+
+```{r, message=F, warning=F}
+library(tidyverse) # Tools for data science (graphing, data reorganizing, etc.)
+# Some custom graphing stuff
+source("./theme_pub.R")
+theme_set(theme_pub())
+library(randomForest)
+```
+
+## Load filtered data
+
+```{r}
+InDat<-read.csv("./data/FixedData.csv")
+
+FixDat<-mutate_if(InDat,is.character,as.factor) # Convert other character cols to factor
+FixDat$Batch.Number<-as.factor(FixDat$Batch.Number) # Treat batch as a factor
+
+str(FixDat[,c(1:10,100:ncol(InDat))])
+
+```
+
+# Scaling 
+
+There are a number of scaling options. These are commonly used but for a discussion specific to metabolomics data, see [van den Berg et al. 2006](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1534033/) (e.g. Table 1).
+```{r}
+Center<-function(x){return(x-mean(x,na.rm=T))}
+Autoscale<-function(x){return((x-mean(x,na.rm=T))/sd(x,na.rm=T))} # aka z-score
+Pareto<-function(x){return((x-mean(x,na.rm=T))/sqrt(sd(x,na.rm=T)))}
+Range<-function(x){return((x-mean(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))}
+Vast<-function(x){return((mean(x,na.rm=T)*(x-mean(x,na.rm=T)))/(sd(x,na.rm=T)^2))} # autoscale divided by CV
+```
+
+Starting with autoscale (z-scores). 
+
+## Scale data
+
+log-transform, normalize to VTM, and scale
+
+```{r}
+ScalFun<-Autoscale # Scaling function to use; selected from functions listed above
+
+scalDat<-FixDat # Output dataset setup
+CT<-scalDat$CT
+
+# Normalize to VTM and log-transform
+# Run each batch separately
+VTM<-FixDat$Class.name=="VTM"
+for(Col in 7:ncol(scalDat)){
+  scalDat[,Col]<-log(scalDat[,Col]+1) # log-transform before subtracting VTM the mean?
+    
+  for(Batch in unique(scalDat$Batch.Number)){ # Separately for each batch:
+    Bat<-scalDat$Batch.Number==Batch
+    # Subtract each observation from(VTM)
+    # Subtract Mean, Min, or Max?
+    scalDat[Bat,Col]<-scalDat[Bat,Col]-mean(scalDat[Bat & VTM,Col],na.rm=T) 
+    ## NOTE: This is functionally similar to dividing conc by VTM and then taking log; i.e. log(A/B) = log(A) - log(B)
+    ## It would be identical except for the +1 in the log to deal with zero values.
+    
+   # print(paste("Batch:", Batch,"Metab:",names(scalDat)[Col],"Mean:",signif(mean(scalDat[Bat,Col],na.rm=T),2))) # Error check
+    # "Mean Dev:",signif(mean(scalDat[Bat,Col]-mean(scalDat[Bat,Col],na.rm=T),na.rm=T),2)))  # Check if avg deviation = 0
+  }
+  # Zero values indicate not-distinguishable from VTM; replace with zero
+  ##scalDat[!is.na(scalDat[,Col]) & scalDat[,Col] < 0,Col] <- 0 
+  # Log-transform after subtracting VTM?
+  ##scalDat[,Col]<-log(scalDat[,Col]+1)
+}
+
+
+# Scale using function defined above
+scalDat<-mutate_if(scalDat,is.numeric,
+    ScalFun)
+# Revert CT value back to raw
+scalDat$CT<-CT
+```
+
+
+Some good options might be:
+
+  1. Range with min/max drawn from VTM as a standard.
+  2. Log-transforming and then subtracting VTM
+  3. Subtracting VTM and then log-transforming -- seems to work best based on PCA
+
+## Missing Data
+
+Exclude rows and columns with too many NAs or zeros, which can happen depending on normalization above.
+
+```{r}
+ExSample<-25 # Exclude samples with more than this many zeros or missing values
+ExMet<-50 # Exclude metabolites with more than this many zeros or missing values
+
+# Calculate # missing values for each row and column
+RowNA<-rowSums(is.na(scalDat)) 
+ColNA<-colSums(is.na(scalDat))
+
+# Calculate # missing values for each row and column
+RowZ<-rowSums(scalDat==0,na.rm=T) 
+ColZ<-colSums(scalDat==0,na.rm=T)
+
+scalDat<-scalDat[RowNA < ExSample & RowZ < ExSample,
+                ColNA < ExMet & ColZ < ExMet | names(scalDat) %in% 
+                  c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT")]
+
+```
+
+# Impute missing values
+
+See paper by [Wei et al. 2018](https://www.nature.com/articles/s41598-017-19120-0)
+
+Imputation of missing values using Random Forest Models
+
+How many missing values need to be imputed?
+```{r}
+sum(colSums(is.na(scalDat)))
+table(colSums(is.na(scalDat)))
+```
+
+Impute missing values. Can't handle more than 53 predictors at a time. Therefore subset to only columns with at least one NA.
+
+Note the predictor variable used to impute values is a combination of Class.name and Batch.Number.
+```{r}
+ImputeCols<-names(scalDat[,colSums(is.na(scalDat))>0])[-c(1:3)]
+ImpVals<-rfImpute(x=scalDat[,ImputeCols],
+               y=as.factor(paste(scalDat$Class.name,scalDat$Batch.Number,sep="-")),
+               iter=10,ntree=500) 
+```
+
+## Replace missing values
+
+```{r}
+ImpDat<-scalDat
+ImpDat[,ImputeCols]<-ImpVals[,ImputeCols]
+# Check
+sum(colSums(is.na(scalDat[,ImputeCols]))) # Original missing values
+sum(colSums(is.na(ImpDat[,ImputeCols]))) # Imputed NA (shoulc be 0)
+```
+
+## Histograms output
+
+Create pdf file to inspect data.
+
+```{r}
+DescNames<-c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT")
+Concs<-names(ImpDat)[!names(ImpDat) %in% DescNames] # Columns with concentration (metabolite) data
+```
+
+```{r eval=F}
+HistDat<-ImpDat %>% gather(Metab,Conc,all_of(Concs))
+pdf("./Output/Scaled_Conc_Hist.pdf",width=24,height=24)
+  qplot(x=Conc,fill=Batch.Number,data=HistDat,main="Batch") +
+    facet_wrap(vars(Metab),scales="free")
+  qplot(x=Conc,fill=Class.name,data=HistDat,main="Class") +
+    facet_wrap(vars(Metab),scales="free")
+dev.off()
+```
+
+# Output scaled data
+
+```{r}
+write.csv(ImpDat,"./data/ScaledData.csv",row.names=F)
+```
+
+

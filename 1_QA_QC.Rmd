@@ -1,0 +1,174 @@
+---
+title: "Data QA/QC"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+## Basic setup for plotting and data handling 
+
+```{r, message=F}
+library(tidyverse) # Tools for data science (graphing, data reorganizing, etc.)
+# Some custom graphing stuff
+source("theme_pub.R")
+theme_set(theme_pub())
+```
+
+```{r}
+InDat<-read.csv("./data/RawData.csv")
+```
+
+# Fixing data
+
+## Set batch number to factor
+
+```{r}
+InDat$Batch.Number<-as.factor(InDat$Batch.Number)
+```
+
+## Separate descrptive columns from measurements
+
+```{r}
+DescNames<-c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT")
+DesCols<-InDat[,names(InDat) %in% DescNames]
+DatCols<-InDat[,!names(InDat) %in% DescNames]
+```
+
+## Replace non-numeric values
+
+Replace with NA or 0
+
+```{r}
+NAs<-c("FAILED") # Strings to replace with missing values
+Zeros<-c("< 0|No Peak|#DIV/0") # Strings to replace with 0 (separated by |)
+
+DatCols<-mutate_if(DatCols,
+                  is.character,
+                  str_replace_all, pattern = NAs, replacement = "NA") 
+DatCols<-mutate_if(DatCols,
+                  is.character,
+                  str_replace_all, pattern = Zeros, replacement = "0")
+```
+
+Convert edited data columns from character data back to numeric data
+
+```{r, warning=F}
+DatCols<-mutate_if(DatCols,is.character,as.numeric)
+
+#str(Metabolites) #Check data structure
+```
+
+## Remove uninformative rows/cols
+
+```{r}
+# Remove columns with no usable data (all NA)
+keepCols<-names(DatCols[,colSums(is.na(DatCols)) < nrow(DatCols)])
+# Remove rows with no usable data (all NA)
+keepRows<-rowSums(is.na(DatCols)) < ncol(DatCols)
+#
+fixDat<-cbind(DesCols,DatCols[,keepCols])[keepRows,]
+```
+
+## Missing data (non-zero)
+
+```{r}
+# Calculate # missing values for each row and column
+RowNA<-rowSums(is.na(fixDat)) 
+RowNA[RowNA>0]
+
+ColNA<-colSums(is.na(fixDat))
+ColNA[ColNA>0]
+```
+
+## Zeros
+
+```{r}
+# Calculate # missing values for each row and column
+RowZ<-rowSums(fixDat==0,na.rm=T) 
+RowZ[RowZ>0]
+
+ColZ<-colSums(fixDat==0,na.rm=T)
+ColZ[ColZ>0]
+```
+
+# Data Distribution
+
+Inspect distribution of data. File output to `Concentration_Hist.pdf` for inspection, in a folder called `Output` (you may need to create this folder to avoid errors). Note log-transformation of values (x-axis).
+
+```{r}
+Concs<-names(select_if(fixDat,is.numeric)) # Columns with concentration (metabolite) data
+HistDat<-fixDat %>% gather(Metab,Conc,all_of(Concs))
+```
+
+
+```{r, eval=F}
+pdf("./Output/Concentration_Hist.pdf",width=24,height=24)
+  qplot(x=log(Conc+1),fill=Batch.Number,data=HistDat,main="Batch") +
+    facet_wrap(vars(Metab),scales="free")
+  qplot(x=log(Conc+1),fill=Class.name,data=HistDat,main="Class") +
+    facet_wrap(vars(Metab),scales="free")
+dev.off()
+```
+
+Conclusion: Many concentrations are not normally distributed, even after log-transformation. Non-parametric methods are recommended. 
+
+## Example:
+
+Raw data:
+
+```{r}
+qplot(fixDat$C18.1,fill=fixDat$Class.name,posit="dodge")
+```
+
+Log-transformed:
+
+```{r}
+qplot(log(fixDat$C18.1+1),fill=fixDat$Class.name,posit="dodge")
+```
+
+See the [bestNormalize](https://cran.r-project.org/web/packages/bestNormalize/vignettes/bestNormalize.html) package in R for transformation options.
+
+# Filter problematic data
+
+## Missing Data
+
+```{r}
+ExSample<-25 # Exclude samples with more than this many zeros or missing values
+ExMet<-50 # Exclude metabolites with more than this many zeros or missing values
+
+bestDat<-fixDat[RowNA < ExSample & RowZ < ExSample,
+                ColNA < ExMet & ColZ < ExMet | colnames(fixDat) == "CT"]
+
+```
+
+## Excluded columns:
+
+```{r}
+names(fixDat[,!names(fixDat) %in% names(bestDat)])
+```
+
+## Plot missing data
+
+Pre-correction
+
+```{r}
+qplot(rowSums(fixDat==0,na.rm=T))+xlab("Zeros/NAs")+ylab("N Samples")
+```
+
+Post-correction
+
+```{r}
+qplot(rowSums(bestDat==0,na.rm=T))+xlab("Zeros/NAs")+ylab("N Samples")
+```
+
+# Output 
+
+Write the filtered data to csv file for analysis.
+
+```{r}
+write.csv(bestDat,"./data/FixedData.csv",row.names=F)
+```

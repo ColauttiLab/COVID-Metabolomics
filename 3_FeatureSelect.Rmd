@@ -1,0 +1,433 @@
+---
+title: "Feature Selection"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+## Basic setup for plotting and data handling
+
+```{r, message=F, warning=F}
+library(lmPerm) # Library for permutation tests
+library(tidyverse) # Tools for data science (graphing, data reorganizing, etc.)
+# Some custom graphing stuff
+source("./theme_pub.R")
+theme_set(theme_pub())
+```
+
+## Load filtered & scaled data
+
+```{r}
+InDat<-read.csv("./data/ScaledData.csv")
+
+scalDat<-mutate_if(InDat,is.character,as.factor) # Convert other character cols to factor
+scalDat$Batch.Number<-as.factor(scalDat$Batch.Number) # Treat batch as a factor
+```
+
+## Filtering
+
+P-values for filtering (after adjusting P for false discovery rate)
+
+```{r}
+PBatch<-0.2 # Batch (and other) effects, keep only metabolites if P > PBatch
+PModA<-PModB<-PModC<-PModD<-0.01 # Keep only predictive metabolites with P < this value
+PModCT<-0.1 # Keep metabolites correlated with CT value (COVID patients only) based on this P-value
+```
+
+# Batch Effects
+
+There are a few options for dealing with batch effects. We'll start by excluding metabolites that show Class x Batch interactions. These metabolites will complicate our ML models because patients with different diseases show different profiles for these metabolites when run in different batches. This suggests some technical issue that is going to complicate diagnosis and therefore these should be excluded.
+
+## ANOVA test
+
+There are two options here: Basic ANOVA and a permutation ANOVA. The latter estimates p-values by reshuffling the data and comparing observed values to a null distribution. The advantage of permutation is that it makes no assumptions about the data distribution. The downside is that the `lmp()` function to run permutation in R doesn't seem to return p-values as an object, so I can't automate feature selection.
+
+> TO DO: Re-run with permutation (`PermMod`) and compare significant interaction terms with those identified by basic ANOVA. Are they consistent?
+
+### Raw Data
+
+```{r}
+PermTest<-FALSE # set to true and re-run chunck to run the same analysis with permutation test for comparison
+DescNames<-c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT")
+Concs<-names(scalDat)[!names(scalDat) %in% DescNames] # Columns with concentration (metabolite) data
+Batch.Interactions<-data.frame(Metabolite=Concs,P=NA)
+BasicMod<-function(x,ColDat){
+  return(lm(ColDat ~ Batch.Number * Class.name, data=x))
+}
+PermMod<-function(x,ColDat){
+  return(lmp(ColDat ~ Batch.Number * Class.name, data=x,perm="Prob"))
+}
+Row<-0
+for(Col in Concs){
+  Row<-Row+1
+  cat("----------------------------------------\n")
+  cat(paste("ANOVA test of",Col,"\n"))
+  print(anova(BasicMod(x=scalDat,ColDat=scalDat[,Col])))
+  Batch.Interactions[Row,]<-c(Col,anova(BasicMod(x=scalDat,ColDat=scalDat[,Col]))[[5]][3]) # Save P-values
+  if(PermTest==TRUE){
+    cat(paste("Permutation test of",Col,"\n"))
+    anova(PermMod(x=scalDat,ColDat=scalDat[,Col]))
+  }
+
+  cat("----------------------------------------\n\n\n")
+}
+Batch.Interactions$P<-as.numeric(Batch.Interactions$P)
+```
+
+### Filter features
+
+Remove features with significant interaction effects.
+
+```{r}
+qplot(Batch.Interactions$P) # Full data
+```
+
+# False Discovery Rate
+
+## Benjamini-Hochberg FDR
+
+Instructions to adjust for false discovery based on the the B-H method. Can be calculated manually using the p-values above:
+
+  1. Make a new data table and input p-values from each metabolite in a column.
+  2. Sort from lowest to highest.
+  2. Add a 2nd column assigning ranks (1 lowest to N highest).
+  3. Add a 3rd column to Calculate the B-H value, using the formula:
+  
+  $$C = \frac{R}{N}\alpha$$
+  where:
+  $R$ is is the rank of the p-value
+  $N$ is the number of tests (i.e. metabolites): `r length(Concs)`
+  $\alpha$ is the desired FDR (e.g. 0.05)
+  
+  4. Find the largest $p < C$.
+  5. All p-values up to this rank are significant at adjusted $p = \alpha$
+  
+## FDR Calculation
+
+> Decide how stringent to be. E.g. keep anything that is non-significant after adjusting for false-discovery rate vs. higher p-value like 0.1 or 0.2.
+
+```{r}
+BIsort<-Batch.Interactions[order(Batch.Interactions$P),]
+BIsort$Rank<-c(1:nrow(BIsort))
+BIsort$BH<-BIsort$Rank/nrow(BIsort)*PBatch
+```
+
+### Filtered Metabolites
+
+```{r}
+ConcKeep<-BIsort$Metabolite[BIsort$P>BIsort$BH]
+ConcRem<-BIsort$Metabolite[BIsort$P<=BIsort$BH]
+  
+cat("----------------------------------------\n")
+paste("Metabolites removed: ",paste(ConcRem, collapse=", "))
+cat("----------------------------------------\n")
+paste("Metabolites kept: ",paste(ConcKeep, collapse=", "))
+cat("----------------------------------------\n")
+
+```
+
+
+# Batch effects
+
+Remove batch effects for remaining metabolites by taking the residuals of a linear model with Batch as the predictor variable.
+
+```{r}
+Concs<-ConcKeep  # Define concentration columns to keep based on filters above
+resDat<-scalDat[,Concs]*0 # Subset data and set to 0
+```
+
+Write a function to calculate residuals given input data x and predictor column Resp
+
+```{r}
+BasicLM<-function(x,Resp){ # x is the full data frame, Resp is just the predictor column (vector)
+  return(lm(Resp ~ x$Batch.Number)$residuals)
+}
+```
+
+Apply the function to the input data and save the output
+
+```{r}
+for(Col in 1:ncol(resDat)){
+  ColName<-names(resDat)[Col]
+  resDat[,Col]<-BasicLM(x=scalDat,Resp=scalDat[,ColName])
+}
+```
+
+Add the grouping columns back
+
+```{r}
+resDat<-cbind(scalDat[,c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT")],resDat)
+```
+
+# Feature Selection
+
+## 1. Subset A: Respiratory vs Control
+
+Filter features that differ among one or more groups.
+
+```{r}
+PATdat<-resDat %>% # Dataset with new encoding
+  filter(Class.name %in% c("COVID19","Influenza","RSV","Control"))
+PATdat$Class.name<-recode_factor(PATdat$Class.name, COVID19 = "Resp", Influenza = "Resp", RSV = "Resp")
+
+FtestOutA<-data.frame(Metabolite=Concs,P=NA)
+GrpMod<-function(x,ColDat){
+  return(lm(ColDat ~ Class.name, data=x))
+}
+Row<-0
+for(Col in Concs){
+  Row<-Row+1
+  cat("----------------------------------------\n")
+  cat(paste("ANOVA test of",Col,"\n"))
+  print(anova(GrpMod(x=PATdat,ColDat=PATdat[,Col])))
+  FtestOutA[Row,]<-c(Col,anova(GrpMod(x=PATdat,ColDat=PATdat[,Col]))[[5]][1]) # Save p-value
+  cat("----------------------------------------\n\n\n")
+}
+FtestOutA$P<-as.numeric(FtestOutA$P)
+```
+
+### FDR Calculation
+
+```{r}
+GrpSortA<-FtestOutA[order(FtestOutA$P),]
+GrpSortA$Rank<-c(1:nrow(GrpSortA))
+GrpSortA$BH<-GrpSortA$Rank/nrow(GrpSortA)*PModA
+```
+
+#### Filtered Metabolites
+
+NOTE the direction >< vs filtering for Batch effects (now we want to keep significant effects)
+
+```{r}
+ConcKeepA<-GrpSortA$Metabolite[GrpSortA$P<GrpSortA$BH]
+ConcRemA<-GrpSortA$Metabolite[GrpSortA$P>=GrpSortA$BH]
+  
+cat("----------------------------------------\n")
+paste("Metabolites removed: ",paste(ConcRemA, collapse=", "))
+cat("----------------------------------------\n")
+paste("Metabolites kept: ",paste(ConcKeepA, collapse=", "))
+cat("----------------------------------------\n")
+
+```
+
+## 2. Subset B: COVID vs Other Resp
+
+Features that distinguish COVID from other respiratory Disease
+
+```{r}
+COVIDdat<-resDat %>% # Dataset with new encoding
+  filter(Class.name %in% c("COVID19","Influenza","RSV"))
+COVIDdat$Class.name<-recode_factor(COVIDdat$Class.name, Influenza = "Other", RSV = "Other")
+
+FtestOutB<-data.frame(Metabolite=Concs,P=NA) # Reset output dataframe
+Row<-0
+for(Col in Concs){
+  Row<-Row+1
+  cat("----------------------------------------\n")
+  cat(paste("ANOVA test of",Col,"\n"))
+  print(anova(GrpMod(x=COVIDdat,ColDat=COVIDdat[,Col])))
+  FtestOutB[Row,]<-c(Col,anova(GrpMod(x=COVIDdat,ColDat=COVIDdat[,Col]))[[5]][1]) # Save P-value
+  cat("----------------------------------------\n\n\n")
+}
+FtestOutB$P<-as.numeric(FtestOutB$P)
+```
+
+### FDR Calculation
+
+> Another stringency value (lower = stronger predictor)
+
+```{r}
+GrpSortB<-FtestOutB[order(FtestOutB$P),]
+GrpSortB$Rank<-c(1:nrow(GrpSortB))
+GrpSortB$BH<-GrpSortB$Rank/nrow(GrpSortB)*PModB
+```
+
+#### Filtered Metabolites
+
+NOTE the direction >< vs filtering for Batch effects (now we want to keep significant effects)
+
+```{r}
+ConcKeepB<-GrpSortB$Metabolite[GrpSortB$P<GrpSortB$BH] 
+ConcRemB<-GrpSortB$Metabolite[GrpSortB$P>=GrpSortB$BH]
+  
+cat("----------------------------------------\n")
+paste("Metabolites removed: ",paste(ConcRemB, collapse=", "))
+cat("----------------------------------------\n")
+paste("Metabolites kept: ",paste(ConcKeepB, collapse=", "))
+cat("----------------------------------------\n")
+
+```
+
+
+## 3. Subset C: COVID + Influenza + RSV
+
+Features that distinguish each category
+
+```{r}
+ALLdat<-resDat %>% # Dataset with new encoding
+  filter(Class.name %in% c("COVID19","Influenza","RSV","Control"))
+
+FtestOutC<-data.frame(Metabolite=Concs,P=NA) # Reset output dataframe
+Row<-0
+for(Col in Concs){
+  Row<-Row+1
+  cat("----------------------------------------\n")
+  cat(paste("ANOVA test of",Col,"\n"))
+  print(anova(GrpMod(x=ALLdat,ColDat=ALLdat[,Col])))
+  FtestOutC[Row,]<-c(Col,anova(GrpMod(x=ALLdat,ColDat=ALLdat[,Col]))[[5]][1]) # Save P-value
+  cat("----------------------------------------\n\n\n")
+}
+FtestOutC$P<-as.numeric(FtestOutC$P)
+```
+
+### FDR Calculation
+
+> Another stringency value (lower = stronger predictor)
+
+```{r}
+GrpSortC<-FtestOutC[order(FtestOutC$P),]
+GrpSortC$Rank<-c(1:nrow(GrpSortC))
+GrpSortC$BH<-GrpSortC$Rank/nrow(GrpSortC)*PModC
+```
+
+#### Filtered Metabolites
+
+NOTE the direction >< vs filtering for Batch effects (now we want to keep significant effects)
+
+```{r}
+ConcKeepC<-GrpSortC$Metabolite[GrpSortC$P<GrpSortC$BH] 
+ConcRemC<-GrpSortC$Metabolite[GrpSortC$P>=GrpSortC$BH]
+  
+cat("----------------------------------------\n")
+paste("Metabolites removed: ",paste(ConcRemC, collapse=", "))
+cat("----------------------------------------\n")
+paste("Metabolites kept: ",paste(ConcKeepC, collapse=", "))
+cat("----------------------------------------\n")
+
+```
+
+
+## 4. Correlations with COVID CT
+
+Features that distinguish each category
+
+```{r}
+ALLdat<-scalDat %>% # Dataset with new encoding
+  filter(Class.name %in% c("COVID19"))
+CTMod<-function(x,ColDat){
+  return(lm(ColDat ~ as.numeric(CT) + Batch.Number, data=x))
+}
+
+CTtestOut<-data.frame(Metabolite=Concs,P=NA) # Reset output dataframe
+Row<-0
+for(Col in Concs){
+  Row<-Row+1
+  cat("----------------------------------------\n")
+  cat(paste("ANOVA test of",Col,"\n"))
+  print(anova(CTMod(x=ALLdat,ColDat=ALLdat[,Col])))
+  CTtestOut[Row,]<-c(Col,anova(CTMod(x=ALLdat,ColDat=ALLdat[,Col]))[[5]][1]) # Save P-value
+  cat("----------------------------------------\n\n\n")
+}
+CTtestOut$P<-as.numeric(CTtestOut$P)
+```
+
+### FDR Calculation
+
+> Another stringency value (lower = stronger predictor)
+
+```{r}
+GrpSortCT<-CTtestOut[order(CTtestOut$P),]
+GrpSortCT$Rank<-c(1:nrow(GrpSortCT))
+GrpSortCT$BH<-GrpSortCT$Rank/nrow(GrpSortCT)*PModCT
+```
+
+#### Filtered Metabolites
+
+NOTE the direction >< vs filtering for Batch effects (now we want to keep significant effects)
+
+```{r}
+ConcKeepCT<-GrpSortCT$Metabolite[GrpSortCT$P<GrpSortCT$BH] 
+ConcRemCT<-GrpSortCT$Metabolite[GrpSortCT$P>=GrpSortCT$BH]
+  
+cat("----------------------------------------\n")
+paste("Metabolites removed: ",paste(ConcRemCT, collapse=", "))
+cat("----------------------------------------\n")
+paste("Metabolites kept: ",paste(ConcKeepCT, collapse=", "))
+cat("----------------------------------------\n")
+
+```
+
+
+
+
+# Output
+
+Save data for downstream analysis.
+
+Filtered + Residuals from Batch Effects:
+
+```{r}
+write.csv(resDat,"./data/ResidualData.csv",row.names=F)
+```
+
+Filtered + Residuals + Significant Metabolites from Batch Effects:
+
+Group A (see above)
+
+```{r}
+write.csv(resDat[,c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT",
+                    ConcKeepA)],"./data/FeatDatA.csv",row.names=F)
+```
+
+Group B (see above)
+
+```{r}
+write.csv(resDat[,c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT",
+                    ConcKeepB)],"./data/FeatDatB.csv",row.names=F)
+```
+
+Group C (see above)
+
+```{r}
+write.csv(resDat[,c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT",
+                    ConcKeepC)],"./data/FeatDatC.csv",row.names=F)
+```
+
+Group CT (see above)
+```{r}
+write.csv(resDat[,c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT",
+                    ConcKeepCT)],"./data/FeatDatCT.csv",row.names=F)
+```
+
+
+# Test Residuals
+
+QC check to make sure batch effects were removed in `resDat` (residual) data. 
+
+```{r}
+PermTest<-FALSE # Set to TRUE to output permutation models
+DescNames<-c("Sample.Name","Batch.Number","Class.name","Sex","Age","CT")
+Concs<-names(scalDat)[!names(scalDat) %in% DescNames] # Columns with concentration (metabolite) data
+PermMod<-function(x,ColDat){
+  return(lmp(ColDat ~ Batch.Number + Class.name, data=x,perm="Prob"))
+}
+
+if(PermTest==TRUE){
+  for(Col in Concs){
+    cat("----------------------------------------\n")
+    cat(paste("Permutation test of",Col,"\n"))
+    anova(PermMod(x=resDat,ColDat=resDat[,Col]))
+    cat("----------------------------------------\n\n\n")
+  }
+}
+```
+
+
+
+
+
+
