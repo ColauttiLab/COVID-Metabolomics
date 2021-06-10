@@ -1,30 +1,18 @@
 ---
-title: "Main Figures & Plotting Data"
-output: html_document
+title: "Supplementary Information"
+output html_document
 ---
+
+Supplementary Information for "*Small molecule metabolome identifies potential therapeutic targets against COVID-19.*"
+
+Authors:	Sean Bennet, Martin Kaufmann, Calvin Sjaarda, Kaede Takami, Katya Douchant, Emily Moslinger, Henry Wong, D Reed, A Ellis, S Vanner, Robert I. Colautti,#, Prameet M. Sheth
+
+
+> NOTE: Raw data and fully reproducible code for this project are available on GitHub: http://bit.ly/COVID-Metabolomics
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-
-# Data for plotting
-
-All files in `pDat` folder are datasets used to generate plots below:
-
-## Input
-
-  * `Metabolites.csv` -- Scaled metabolite data: input for (O)PLS models and also used to generate univariate histograms
-
-## Orthogonal data
-
-  * `FULLdat.csv` -- PLS-DA plots (3 axes) on the full model for the four separate groups (with n=3 preditor axes)
-  * `RESPdat.csv` -- OPLS data for the Control vs All Respiratory Model
-  * `COVIDdat.csv` -- OPLS data for COVID vs Other Respiratory Model
-
-## Loadings
-
-  * `FULLload.csv` -- Loadings from the Full Model (NOTE: not used for prediction analysis)
-  * `OPLSload.csv` -- Loadings from both OPLS models, used to generate combined loading plot
 
 # Setup
 
@@ -450,7 +438,7 @@ for(Met in unique(CTdat$Metab)){
 Stats summary: Influenze has significantly higher CT count overall, but no effect of 
 
 
-What about COVID1? 
+What about COVID1 axis from OPLS-DA model -- does it predict CT values? 
 
 
 Setup: 
