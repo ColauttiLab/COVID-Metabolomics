@@ -1,6 +1,6 @@
 ---
 title: "Supplementary Information"
-output html_document
+output: html_document
 ---
 
 Supplementary Information for "*Small molecule metabolome identifies potential therapeutic targets against COVID-19.*"
