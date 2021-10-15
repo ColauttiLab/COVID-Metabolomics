@@ -21,6 +21,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r, message=F, warning=F}
 library(tidyverse) # Tools for data science (graphing, data reorganizing, etc.)
 library(ropls) 
+library(pROC)
 
 # Some custom graphing stuff
 source("./theme_pub.R")
@@ -182,6 +183,26 @@ TN<-sum(TestFit)-TP-FP-FN# True Negative
 pOPLSMod<-opls(metData, patClass, fig.pdfC="none")
 ```
 
+### ROC
+
+```{r}
+ROCrespTrain<-roc(patClass[trainSet],pOPLSMod@scoreMN[trainSet,1])
+ROCrespTest<-roc(patClass[-trainSet],pOPLSMod@scoreMN[-trainSet,1])
+
+ggroc(data=ROCrespTrain,colour="blue") + ggtitle("Training Data") + 
+  xlab("Specificity") + ylab("Sensitivity") + xlim(1,0) +
+  geom_abline(intercept=1,slope=1,colour="grey") 
+ggroc(data=ROCrespTest,colour="red") + ggtitle("Test Data") +
+  xlab("Specificity") + ylab("Sensitivity") + xlim(1,0) +
+  geom_abline(intercept=1,slope=1,colour="grey")
+
+print("Training Data AUC")
+print(ROCrespTrain)
+print("------------------------------")
+print("Validation Data AUC")
+print(ROCrespTest)
+```
+
 ### Accuracy
 
 ```{r}
@@ -289,6 +310,26 @@ TN<-sum(TestFit)-TP-FP-FN# True Negative
 
 # Model for plotting full dataset
 pOPLSMod2<-opls(metData, patClass,fig.pdfC="none")
+```
+
+### ROC
+
+```{r}
+ROCcovidTrain<-roc(patClass[trainSet],pOPLSMod2@scoreMN[trainSet,1])
+ROCcovidTest<-roc(patClass[-trainSet],pOPLSMod2@scoreMN[-trainSet,1])
+
+ggroc(data=ROCcovidTrain,colour="blue") + ggtitle("Training Data") + 
+  xlab("Specificity") + ylab("Sensitivity") + xlim(1,0) +
+  geom_abline(intercept=1,slope=1,colour="grey") 
+ggroc(data=ROCcovidTest,colour="red") + ggtitle("Test Data") +
+  xlab("Specificity") + ylab("Sensitivity") + xlim(1,0) +
+  geom_abline(intercept=1,slope=1,colour="grey")
+
+print("Training Data AUC")
+print(ROCcovidTrain)
+print("------------------------------")
+print("Validation Data AUC")
+print(ROCcovidTest)
 ```
 
 ### Accuracy
